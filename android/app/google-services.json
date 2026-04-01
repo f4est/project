@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "632080134121",
+    "project_id": "fitpilot-79b2d",
+    "storage_bucket": "fitpilot-79b2d.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:632080134121:android:cd3965e86d8a5d297f2578",
+        "android_client_info": {
+          "package_name": "com.youxu.fitpilot"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBU8RtXKf3p2xfYJIdURhIwCq_J9FUcuBE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

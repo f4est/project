@@ -21,6 +21,20 @@ class SettingsPage extends StatelessWidget {
                 'Голос тренера',
                 style: Theme.of(context).textTheme.titleLarge,
               ),
+              const SizedBox(height: 12),
+              Text('Оформление', style: Theme.of(context).textTheme.titleLarge),
+              const SizedBox(height: 8),
+              SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(value: 'system', label: Text('Система')),
+                  ButtonSegment(value: 'light', label: Text('Светлая')),
+                  ButtonSegment(value: 'dark', label: Text('Тёмная')),
+                ],
+                selected: {settings.themeMode},
+                onSelectionChanged: (value) {
+                  controller.update(settings.copyWith(themeMode: value.first));
+                },
+              ),
               const SizedBox(height: 8),
               SegmentedButton<String>(
                 segments: const [
@@ -47,6 +61,10 @@ class SettingsPage extends StatelessWidget {
                 },
               ),
               const SizedBox(height: 16),
+              Text(
+                'Тренировки и устройства',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
               SwitchListTile.adaptive(
                 title: const Text('Голосовые подсказки'),
                 subtitle: const Text(
@@ -61,6 +79,24 @@ class SettingsPage extends StatelessWidget {
                 value: settings.vibrationEnabled,
                 onChanged: (v) =>
                     controller.update(settings.copyWith(vibrationEnabled: v)),
+              ),
+              SwitchListTile.adaptive(
+                title: const Text('Автосинхронизация часов и браслетов'),
+                value: settings.autoSyncWearables,
+                onChanged: (v) =>
+                    controller.update(settings.copyWith(autoSyncWearables: v)),
+              ),
+              SwitchListTile.adaptive(
+                title: const Text('Использовать данные сна'),
+                value: settings.includeSleepData,
+                onChanged: (v) =>
+                    controller.update(settings.copyWith(includeSleepData: v)),
+              ),
+              SwitchListTile.adaptive(
+                title: const Text('Использовать данные SpO2'),
+                value: settings.includeOxygenData,
+                onChanged: (v) =>
+                    controller.update(settings.copyWith(includeOxygenData: v)),
               ),
               const SizedBox(height: 8),
               Text(
@@ -78,6 +114,16 @@ class SettingsPage extends StatelessWidget {
                     fontScale: double.parse(v.toStringAsFixed(2)),
                   ),
                 ),
+              ),
+              const SizedBox(height: 8),
+              SwitchListTile.adaptive(
+                title: const Text('Режим приватности'),
+                subtitle: const Text(
+                  'Скрывать личные данные и ограничивать подробную статистику',
+                ),
+                value: settings.privacyMode,
+                onChanged: (v) =>
+                    controller.update(settings.copyWith(privacyMode: v)),
               ),
             ],
           ),

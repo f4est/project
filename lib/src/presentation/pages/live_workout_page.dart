@@ -1,9 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:camera/camera.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 import 'package:project/src/domain/services/live_workout_analyzer.dart';
@@ -15,11 +16,13 @@ class LiveWorkoutPage extends StatefulWidget {
     super.key,
     required this.dayPlan,
     required this.appSettings,
+    required this.nowProvider,
     required this.onSessionFinished,
   });
 
   final DailyWorkoutPlan dayPlan;
   final AppSettings appSettings;
+  final DateTime Function() nowProvider;
   final Future<void> Function({
     required bool completed,
     required int perceivedDifficulty,
@@ -40,6 +43,7 @@ class _LiveWorkoutPageState extends State<LiveWorkoutPage> {
   Timer? _restTimer;
   final FlutterTts _tts = FlutterTts();
   final LiveWorkoutAnalyzer _analyzer = LiveWorkoutAnalyzer();
+  CameraLensDirection _lensDirection = CameraLensDirection.front;
 
   bool _isReady = false;
   bool _isBusy = false;
@@ -54,7 +58,12 @@ class _LiveWorkoutPageState extends State<LiveWorkoutPage> {
   double _qualityScore = 0;
   DateTime _startedAt = DateTime.now();
   DateTime _lastLowQualityHintAt = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastTechniqueHintAt = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastFrameUpdateAt = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastFrameProcessedAt = DateTime.fromMillisecondsSinceEpoch(0);
   String _liveHint = 'Подготовьтесь и начните движение.';
+  String _repStatus =
+      'Повторы начнут считаться после первого корректного движения.';
   List<String> _liveErrors = const [];
 
   WorkoutExercise get _currentExercise =>
@@ -68,7 +77,8 @@ class _LiveWorkoutPageState extends State<LiveWorkoutPage> {
   @override
   void initState() {
     super.initState();
-    _startedAt = DateTime.now();
+    _startedAt = widget.nowProvider();
+    _lastFrameUpdateAt = widget.nowProvider();
     _setup();
   }
 
@@ -84,6 +94,9 @@ class _LiveWorkoutPageState extends State<LiveWorkoutPage> {
   Future<void> _setup() async {
     try {
       await _configureVoice();
+      await _cameraController?.stopImageStream();
+      await _cameraController?.dispose();
+      await _poseDetector?.close();
 
       final cameras = await availableCameras();
       if (cameras.isEmpty) {
@@ -95,16 +108,9 @@ class _LiveWorkoutPageState extends State<LiveWorkoutPage> {
       }
 
       final camera = cameras.firstWhere(
-        (item) => item.lensDirection == CameraLensDirection.front,
+        (item) => item.lensDirection == _lensDirection,
         orElse: () => cameras.first,
       );
-
-      final controller = CameraController(
-        camera,
-        ResolutionPreset.medium,
-        enableAudio: false,
-      );
-      await controller.initialize();
 
       final detector = PoseDetector(
         options: PoseDetectorOptions(
@@ -113,12 +119,13 @@ class _LiveWorkoutPageState extends State<LiveWorkoutPage> {
         ),
       );
 
-      await controller.startImageStream(_processFrame);
+      final controller = await _startCameraWithFallback(camera);
 
       setState(() {
         _cameraController = controller;
         _poseDetector = detector;
         _isReady = true;
+        _lastFrameProcessedAt = DateTime.fromMillisecondsSinceEpoch(0);
       });
 
       await _speak(
@@ -130,6 +137,22 @@ class _LiveWorkoutPageState extends State<LiveWorkoutPage> {
         _liveHint = 'Не удалось запустить камеру. Проверьте разрешения.';
       });
     }
+  }
+
+  Future<void> _switchCamera() async {
+    if (_isBusy) {
+      return;
+    }
+    setState(() {
+      _isReady = false;
+      _lensDirection = _lensDirection == CameraLensDirection.front
+          ? CameraLensDirection.back
+          : CameraLensDirection.front;
+      _liveHint = _lensDirection == CameraLensDirection.front
+          ? 'Переключено на фронтальную камеру.'
+          : 'Переключено на основную камеру.';
+    });
+    await _setup();
   }
 
   Future<void> _configureVoice() async {
@@ -184,6 +207,12 @@ class _LiveWorkoutPageState extends State<LiveWorkoutPage> {
     if (_isBusy || _isRestPhase || _isSessionFinished) {
       return;
     }
+    final now = widget.nowProvider();
+    if (now.difference(_lastFrameProcessedAt) <
+        const Duration(milliseconds: 70)) {
+      return;
+    }
+    _lastFrameProcessedAt = now;
     final controller = _cameraController;
     final detector = _poseDetector;
     if (controller == null || detector == null) {
@@ -193,14 +222,30 @@ class _LiveWorkoutPageState extends State<LiveWorkoutPage> {
     try {
       final inputImage = _toInputImage(image, controller);
       if (inputImage == null) {
+        await _notifyTechniqueIssue(
+          'Формат камеры не поддерживается для анализа.',
+          voiceText: 'Не удаётся обработать кадр с камеры.',
+        );
+        if (mounted) {
+          setState(() {
+            _liveHint = 'Камера работает, но анализ кадра не запускается.';
+            _repStatus = 'Повтор не засчитан: кадр не обработан.';
+          });
+        }
         return;
       }
       final poses = await detector.processImage(inputImage);
+      _lastFrameUpdateAt = widget.nowProvider();
       if (poses.isEmpty) {
+        await _notifyTechniqueIssue(
+          'Камера не видит тело полностью.',
+          voiceText: 'Встаньте так, чтобы камера видела вас полностью.',
+        );
         if (mounted) {
           setState(() {
             _qualityScore = 0;
             _liveHint = 'Встаньте так, чтобы в кадр попадало всё тело.';
+            _repStatus = 'Повтор не засчитан: не видно позу.';
           });
         }
         return;
@@ -214,67 +259,130 @@ class _LiveWorkoutPageState extends State<LiveWorkoutPage> {
       final rightAnkle = pose.landmarks[PoseLandmarkType.rightAnkle];
       final leftShoulder = pose.landmarks[PoseLandmarkType.leftShoulder];
       final rightShoulder = pose.landmarks[PoseLandmarkType.rightShoulder];
+      final leftElbow = pose.landmarks[PoseLandmarkType.leftElbow];
+      final rightElbow = pose.landmarks[PoseLandmarkType.rightElbow];
+      final leftWrist = pose.landmarks[PoseLandmarkType.leftWrist];
+      final rightWrist = pose.landmarks[PoseLandmarkType.rightWrist];
       final nose = pose.landmarks[PoseLandmarkType.nose];
 
-      if (leftKnee == null ||
-          rightKnee == null ||
-          leftHip == null ||
-          rightHip == null ||
-          leftAnkle == null ||
-          rightAnkle == null ||
-          leftShoulder == null ||
-          rightShoulder == null ||
-          nose == null) {
+      final hasLeftLeg =
+          _landmarkReady(leftKnee) &&
+          _landmarkReady(leftHip) &&
+          _landmarkReady(leftAnkle);
+      final hasRightLeg =
+          _landmarkReady(rightKnee) &&
+          _landmarkReady(rightHip) &&
+          _landmarkReady(rightAnkle);
+      final hasShoulders =
+          _landmarkReady(leftShoulder) || _landmarkReady(rightShoulder);
+      final hasHips = _landmarkReady(leftHip) || _landmarkReady(rightHip);
+
+      if ((!hasLeftLeg && !hasRightLeg) ||
+          !hasShoulders ||
+          !hasHips ||
+          !_landmarkReady(nose)) {
+        await _notifyTechniqueIssue(
+          'Не видны ключевые точки тела.',
+          voiceText: 'Поставьте камеру так, чтобы были видны корпус и ноги.',
+        );
         if (mounted) {
           setState(() {
             _liveHint = 'Камера видит не все ключевые точки тела.';
             _qualityScore = 0;
-            _liveErrors = const ['Встаньте так, чтобы в кадре было всё тело.'];
+            _liveErrors = const [
+              'Встаньте так, чтобы было видно корпус и ноги.',
+            ];
+            _repStatus = 'Повтор не засчитан: не хватает точек для анализа.';
           });
         }
         return;
       }
+      final nosePoint = nose!;
 
-      final leftKneeAngle = _jointAngle(
-        Offset(leftHip.x, leftHip.y),
-        Offset(leftKnee.x, leftKnee.y),
-        Offset(leftAnkle.x, leftAnkle.y),
-      );
-      final rightKneeAngle = _jointAngle(
-        Offset(rightHip.x, rightHip.y),
-        Offset(rightKnee.x, rightKnee.y),
-        Offset(rightAnkle.x, rightAnkle.y),
-      );
-      final shoulderMid = Offset(
-        (leftShoulder.x + rightShoulder.x) / 2,
-        (leftShoulder.y + rightShoulder.y) / 2,
-      );
-      final hipMid = Offset(
-        (leftHip.x + rightHip.x) / 2,
-        (leftHip.y + rightHip.y) / 2,
-      );
-      final ankleMid = Offset(
-        (leftAnkle.x + rightAnkle.x) / 2,
-        (leftAnkle.y + rightAnkle.y) / 2,
-      );
-      final bodyCoverage = (ankleMid.dy - nose.y) / image.height;
-      if (bodyCoverage < 0.62) {
+      final shoulderMid = _midpoint(leftShoulder, rightShoulder);
+      final hipMid = _midpoint(leftHip, rightHip);
+      final ankleMid = _midpoint(leftAnkle, rightAnkle);
+      if (shoulderMid == null || hipMid == null || ankleMid == null) {
+        await _notifyTechniqueIssue(
+          'Недостаточно точек для построения позы.',
+          voiceText: 'Подвиньте камеру, чтобы были видны плечи, таз и ноги.',
+        );
+        if (mounted) {
+          setState(() {
+            _liveHint = 'Поправьте положение камеры.';
+            _qualityScore = 0;
+            _liveErrors = const ['Нужно лучше видеть корпус и ноги.'];
+            _repStatus = 'Повтор не засчитан: позиция камеры не подходит.';
+          });
+        }
+        return;
+      }
+      final leftKneeAngle = hasLeftLeg
+          ? _jointAngle(
+              Offset(leftHip!.x, leftHip.y),
+              Offset(leftKnee!.x, leftKnee.y),
+              Offset(leftAnkle!.x, leftAnkle.y),
+            )
+          : null;
+      final rightKneeAngle = hasRightLeg
+          ? _jointAngle(
+              Offset(rightHip!.x, rightHip.y),
+              Offset(rightKnee!.x, rightKnee.y),
+              Offset(rightAnkle!.x, rightAnkle.y),
+            )
+          : null;
+      final kneeAngle =
+          _averageNullable(leftKneeAngle, rightKneeAngle) ??
+          leftKneeAngle ??
+          rightKneeAngle ??
+          170;
+      final leftElbowAngle =
+          (leftShoulder != null && leftElbow != null && leftWrist != null)
+          ? _jointAngle(
+              Offset(leftShoulder.x, leftShoulder.y),
+              Offset(leftElbow.x, leftElbow.y),
+              Offset(leftWrist.x, leftWrist.y),
+            )
+          : null;
+      final rightElbowAngle =
+          (rightShoulder != null && rightElbow != null && rightWrist != null)
+          ? _jointAngle(
+              Offset(rightShoulder.x, rightShoulder.y),
+              Offset(rightElbow.x, rightElbow.y),
+              Offset(rightWrist.x, rightWrist.y),
+            )
+          : null;
+      final elbowAngle =
+          _averageNullable(leftElbowAngle, rightElbowAngle) ??
+          leftElbowAngle ??
+          rightElbowAngle ??
+          170;
+      final bodySpan = (ankleMid - Offset(nosePoint.x, nosePoint.y)).distance;
+      final frameSpan = max(image.width.toDouble(), image.height.toDouble());
+      final bodyCoverage = bodySpan / max(1.0, frameSpan);
+      if (bodyCoverage < 0.32) {
+        await _notifyTechniqueIssue(
+          'Слишком близко к камере.',
+          voiceText: 'Отойдите назад, чтобы в кадре были корпус и ноги.',
+        );
         if (mounted) {
           setState(() {
             _qualityScore = 0;
-            _liveHint = 'Отойдите назад: нужно видеть тело почти полностью.';
+            _liveHint =
+                'Отойдите немного назад: в кадре должны быть корпус и ноги.';
             _liveErrors = const [
-              'В кадр должны входить голова, таз и ноги полностью.',
+              'Старайтесь держать в кадре хотя бы верх тела и ноги до щиколоток.',
             ];
+            _repStatus = 'Повтор не засчитан: мало тела в кадре.';
           });
         }
         return;
       }
-      final shoulderWidth = (leftShoulder.x - rightShoulder.x).abs();
+      final shoulderWidth = _horizontalDistance(leftShoulder, rightShoulder);
       final torsoHeight = max(1.0, (hipMid.dy - shoulderMid.dy).abs());
 
-      final shoulderTilt = (leftShoulder.y - rightShoulder.y).abs();
-      final hipTilt = (leftHip.y - rightHip.y).abs();
+      final shoulderTilt = _lineTiltAngle(leftShoulder, rightShoulder);
+      final hipTilt = _lineTiltAngle(leftHip, rightHip);
       final torsoLean = _angleFromVertical(shoulderMid, hipMid);
       final twistOffset = shoulderWidth <= 1
           ? 0.0
@@ -285,9 +393,10 @@ class _LiveWorkoutPageState extends State<LiveWorkoutPage> {
 
       final output = _analyzer.analyze(
         exerciseName: _currentExercise.name,
-        now: DateTime.now(),
+        now: widget.nowProvider(),
         metrics: BodyMetrics(
-          kneeAngle: (leftKneeAngle + rightKneeAngle) / 2,
+          kneeAngle: kneeAngle,
+          elbowAngle: elbowAngle,
           shoulderTilt: shoulderTilt,
           hipTilt: hipTilt,
           torsoLean: torsoLean,
@@ -299,6 +408,21 @@ class _LiveWorkoutPageState extends State<LiveWorkoutPage> {
 
       if (output.repDelta > 0) {
         _onRepDetected(delta: output.repDelta);
+        if (mounted) {
+          setState(() {
+            _repStatus = 'Повтор засчитан.';
+          });
+        }
+      } else if (!_isRestPhase) {
+        final reason = output.errors.isNotEmpty
+            ? output.errors.first
+            : 'Завершите движение полной амплитудой.';
+        if (mounted) {
+          setState(() {
+            _repStatus = 'Повтор не засчитан: $reason';
+          });
+        }
+        await _notifyTechniqueIssue(reason, voiceText: reason);
       }
 
       if (mounted) {
@@ -310,7 +434,7 @@ class _LiveWorkoutPageState extends State<LiveWorkoutPage> {
       }
 
       if (output.qualityScore < 60) {
-        final now = DateTime.now();
+        final now = widget.nowProvider();
         if (now.difference(_lastLowQualityHintAt) >
             const Duration(seconds: 9)) {
           _lastLowQualityHintAt = now;
@@ -320,9 +444,38 @@ class _LiveWorkoutPageState extends State<LiveWorkoutPage> {
           unawaited(_speak(advice));
         }
       }
+    } catch (e) {
+      final userError = _userFacingAnalysisError(e);
+      await _notifyTechniqueIssue(
+        userError,
+        voiceText:
+            'Не получается распознать движение. Попробуйте другой ракурс.',
+      );
+      if (mounted) {
+        setState(() {
+          _repStatus = 'Повтор не засчитан: $userError';
+        });
+      }
     } finally {
       _isBusy = false;
     }
+  }
+
+  Future<void> _notifyTechniqueIssue(
+    String message, {
+    required String voiceText,
+  }) async {
+    final now = widget.nowProvider();
+    if (now.difference(_lastTechniqueHintAt) < const Duration(seconds: 5)) {
+      return;
+    }
+    _lastTechniqueHintAt = now;
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message), duration: const Duration(seconds: 2)),
+      );
+    }
+    await _speak(voiceText);
   }
 
   void _onRepDetected({int delta = 1}) {
@@ -398,7 +551,7 @@ class _LiveWorkoutPageState extends State<LiveWorkoutPage> {
     _restTimer?.cancel();
     final durationMinutes = max(
       10,
-      DateTime.now().difference(_startedAt).inMinutes,
+      widget.nowProvider().difference(_startedAt).inMinutes,
     );
     final quality = _qualityScore;
     final perceivedDifficulty = (10 - (quality / 18)).clamp(3, 9).round();
@@ -446,13 +599,10 @@ class _LiveWorkoutPageState extends State<LiveWorkoutPage> {
   }
 
   InputImage? _toInputImage(CameraImage image, CameraController controller) {
-    final rotation =
-        InputImageRotationValue.fromRawValue(
-          controller.description.sensorOrientation,
-        ) ??
-        InputImageRotation.rotation0deg;
-    final format = InputImageFormatValue.fromRawValue(image.format.raw);
-    if (format == null) {
+    final rotation = _inputImageRotationFromController(controller);
+    final rawFormat = InputImageFormatValue.fromRawValue(image.format.raw);
+    final format = _supportedFormat(rawFormat);
+    if (format == null || image.planes.isEmpty) {
       return null;
     }
 
@@ -470,6 +620,92 @@ class _LiveWorkoutPageState extends State<LiveWorkoutPage> {
         bytesPerRow: image.planes.first.bytesPerRow,
       ),
     );
+  }
+
+  InputImageRotation _inputImageRotationFromController(
+    CameraController controller,
+  ) {
+    final sensor = controller.description.sensorOrientation;
+    final deviceDegrees = switch (controller.value.deviceOrientation) {
+      DeviceOrientation.portraitUp => 0,
+      DeviceOrientation.landscapeLeft => 90,
+      DeviceOrientation.portraitDown => 180,
+      DeviceOrientation.landscapeRight => 270,
+    };
+    final lens = controller.description.lensDirection;
+    final rotationComp = lens == CameraLensDirection.front
+        ? (sensor + deviceDegrees) % 360
+        : (sensor - deviceDegrees + 360) % 360;
+    return InputImageRotationValue.fromRawValue(rotationComp) ??
+        InputImageRotation.rotation0deg;
+  }
+
+  Future<CameraController> _startCameraWithFallback(
+    CameraDescription camera,
+  ) async {
+    Object? lastError;
+    for (final config in _cameraConfigsForPlatform()) {
+      CameraController? controller;
+      try {
+        controller = CameraController(
+          camera,
+          config.resolutionPreset,
+          enableAudio: false,
+          imageFormatGroup: config.imageFormatGroup,
+        );
+        await controller.initialize();
+        await controller.startImageStream(_processFrame);
+        return controller;
+      } catch (e) {
+        lastError = e;
+        await controller?.dispose();
+      }
+    }
+    throw Exception(
+      'Не удалось запустить камеру: ${lastError ?? 'неизвестная ошибка'}',
+    );
+  }
+
+  List<_CameraConfig> _cameraConfigsForPlatform() {
+    if (Platform.isAndroid) {
+      return const [
+        _CameraConfig(ResolutionPreset.medium, ImageFormatGroup.nv21),
+        _CameraConfig(ResolutionPreset.medium, ImageFormatGroup.yuv420),
+        _CameraConfig(ResolutionPreset.high, ImageFormatGroup.yuv420),
+        _CameraConfig(ResolutionPreset.low, ImageFormatGroup.nv21),
+        _CameraConfig(ResolutionPreset.low, ImageFormatGroup.yuv420),
+      ];
+    }
+    return const [
+      _CameraConfig(ResolutionPreset.medium, ImageFormatGroup.bgra8888),
+      _CameraConfig(ResolutionPreset.high, ImageFormatGroup.bgra8888),
+    ];
+  }
+
+  InputImageFormat? _supportedFormat(InputImageFormat? format) {
+    return switch (format) {
+      InputImageFormat.nv21 => InputImageFormat.nv21,
+      InputImageFormat.bgra8888 => InputImageFormat.bgra8888,
+      InputImageFormat.yuv420 => InputImageFormat.yuv420,
+      _ => null,
+    };
+  }
+
+  String _userFacingAnalysisError(Object e) {
+    final text = e.toString().toLowerCase();
+    if (text.contains('format') || text.contains('inputimage')) {
+      return 'Камера передает неподходящий формат. Перезапустите тренировку.';
+    }
+    if (text.contains('camera')) {
+      return 'Поток камеры нестабилен. Попробуйте переключить камеру.';
+    }
+    if (text.contains('pose') || text.contains('ml')) {
+      return 'Система не видит движение достаточно четко. Добавьте свет и отойдите дальше.';
+    }
+    if (text.contains('illegalstate') || text.contains('state')) {
+      return 'Сервис распознавания перезапускается. Повторите попытку через пару секунд.';
+    }
+    return 'Распознавание временно недоступно. Попробуйте сменить ракурс.';
   }
 
   double _jointAngle(Offset a, Offset b, Offset c) {
@@ -492,6 +728,60 @@ class _LiveWorkoutPageState extends State<LiveWorkoutPage> {
     return atan(dx / dy) * 180 / pi;
   }
 
+  Offset? _midpoint(PoseLandmark? a, PoseLandmark? b) {
+    if (a == null && b == null) {
+      return null;
+    }
+    if (a != null && b != null) {
+      return Offset((a.x + b.x) / 2, (a.y + b.y) / 2);
+    }
+    final p = a ?? b!;
+    return Offset(p.x, p.y);
+  }
+
+  double _lineTiltAngle(PoseLandmark? a, PoseLandmark? b) {
+    if (a == null || b == null) {
+      return 0;
+    }
+    final dx = (a.x - b.x).abs();
+    final dy = (a.y - b.y).abs();
+    if (dx < 1) {
+      return 90;
+    }
+    return atan(dy / dx) * 180 / pi;
+  }
+
+  double _horizontalDistance(PoseLandmark? a, PoseLandmark? b) {
+    if (a == null || b == null) {
+      return 0;
+    }
+    return (a.x - b.x).abs();
+  }
+
+  double? _averageNullable(double? a, double? b) {
+    if (a == null && b == null) {
+      return null;
+    }
+    if (a == null) {
+      return b;
+    }
+    if (b == null) {
+      return a;
+    }
+    return (a + b) / 2;
+  }
+
+  bool _landmarkReady(PoseLandmark? point) {
+    if (point == null) {
+      return false;
+    }
+    final likelihood = point.likelihood;
+    if (likelihood.isNaN || likelihood <= 0) {
+      return true;
+    }
+    return likelihood >= 0.35;
+  }
+
   @override
   Widget build(BuildContext context) {
     final total = max(1, _totalWorkReps);
@@ -505,6 +795,12 @@ class _LiveWorkoutPageState extends State<LiveWorkoutPage> {
     return Scaffold(
       appBar: AppBar(
         title: Text('Тренировка с камерой • ${widget.dayPlan.title}'),
+        actions: [
+          IconButton(
+            onPressed: _switchCamera,
+            icon: const Icon(Icons.cameraswitch_outlined),
+          ),
+        ],
       ),
       body: _permissionError
           ? Center(
@@ -517,6 +813,24 @@ class _LiveWorkoutPageState extends State<LiveWorkoutPage> {
           ? const Center(child: CircularProgressIndicator())
           : Column(
               children: [
+                if (_lastFrameUpdateAt !=
+                        DateTime.fromMillisecondsSinceEpoch(0) &&
+                    widget.nowProvider().difference(_lastFrameUpdateAt) >
+                        const Duration(seconds: 3))
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                    child: Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.errorContainer,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Text(
+                        'Временная потеря трекинга: поправьте камеру, освещение или дистанцию.',
+                      ),
+                    ),
+                  ),
                 Expanded(
                   child: Padding(
                     padding: const EdgeInsets.all(12),
@@ -564,6 +878,16 @@ class _LiveWorkoutPageState extends State<LiveWorkoutPage> {
                                 ? 'Отдых: $_restSecondsLeft сек'
                                 : _liveHint,
                           ),
+                          const SizedBox(height: 4),
+                          Text(
+                            _repStatus,
+                            style: TextStyle(
+                              color: _repStatus.startsWith('Повтор засчитан')
+                                  ? Colors.green
+                                  : Theme.of(context).colorScheme.onSurface,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
                           if (!_isRestPhase && _liveErrors.isNotEmpty) ...[
                             const SizedBox(height: 6),
                             for (final error in _liveErrors.take(2))
@@ -600,6 +924,13 @@ class _LiveWorkoutPageState extends State<LiveWorkoutPage> {
   }
 }
 
+class _CameraConfig {
+  const _CameraConfig(this.resolutionPreset, this.imageFormatGroup);
+
+  final ResolutionPreset resolutionPreset;
+  final ImageFormatGroup imageFormatGroup;
+}
+
 class _CameraViewport extends StatelessWidget {
   const _CameraViewport({required this.controller});
 
@@ -610,39 +941,26 @@ class _CameraViewport extends StatelessWidget {
     if (!controller.value.isInitialized) {
       return const SizedBox.shrink();
     }
+    final previewSize = controller.value.previewSize;
+    final previewAspectRatio = previewSize == null
+        ? controller.value.aspectRatio
+        : previewSize.height / previewSize.width;
 
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final screenRatio = constraints.maxWidth / constraints.maxHeight;
-        final previewRatio = controller.value.aspectRatio;
-        var scale = previewRatio / screenRatio;
-        if (scale < 1) {
-          scale = 1 / scale;
-        }
-
-        return Center(
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(18),
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(18),
+      child: ColoredBox(
+        color: Colors.black,
+        child: SizedBox.expand(
+          child: FittedBox(
+            fit: BoxFit.cover,
             child: SizedBox(
-              width: constraints.maxWidth,
-              height: constraints.maxHeight,
-              child: ColoredBox(
-                color: Colors.black,
-                child: Transform.scale(
-                  scale: scale,
-                  alignment: Alignment.center,
-                  child: Center(
-                    child: AspectRatio(
-                      aspectRatio: previewRatio,
-                      child: CameraPreview(controller),
-                    ),
-                  ),
-                ),
-              ),
+              width: 1,
+              height: 1 / previewAspectRatio,
+              child: CameraPreview(controller),
             ),
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 }

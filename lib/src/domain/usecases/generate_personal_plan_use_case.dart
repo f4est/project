@@ -13,10 +13,11 @@ class GeneratePersonalPlanUseCase {
     required List<WorkoutSessionResult> recentSessions,
     required DateTime now,
   }) {
+    final today = DateTime(now.year, now.month, now.day);
     return _engine.buildWeeklyPlan(
       profile: profile,
       recentSessions: recentSessions,
-      generatedAt: now,
+      generatedAt: today,
     );
   }
 }

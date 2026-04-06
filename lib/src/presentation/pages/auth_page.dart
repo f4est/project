@@ -11,7 +11,8 @@ class AuthPage extends StatefulWidget {
   });
 
   final SessionController sessionController;
-  final Future<void> Function(OnboardingProfileInput input) onOnboardingCollected;
+  final Future<void> Function(OnboardingProfileInput input)
+  onOnboardingCollected;
 
   @override
   State<AuthPage> createState() => _AuthPageState();
@@ -63,12 +64,12 @@ class _AuthPageState extends State<AuthPage> {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         Text(
-                          'FitPilot Home AI',
+                          'FitPilot',
                           style: Theme.of(context).textTheme.headlineSmall,
                         ),
                         const SizedBox(height: 8),
                         Text(
-                          'Персональные рекомендации, план тренировок и отслеживание прогресса.',
+                          'Персональный план домашних тренировок, контроль техники и прогресс по вашим данным.',
                           style: Theme.of(context).textTheme.bodyMedium,
                         ),
                         const SizedBox(height: 18),
@@ -99,9 +100,7 @@ class _AuthPageState extends State<AuthPage> {
                             controller: _nameController,
                             textInputAction: TextInputAction.next,
                             autofillHints: const [AutofillHints.name],
-                            decoration: const InputDecoration(
-                              labelText: 'Имя',
-                            ),
+                            decoration: const InputDecoration(labelText: 'Имя'),
                             validator: (value) {
                               if (!_isSignInMode &&
                                   (value ?? '').trim().isEmpty) {
@@ -118,9 +117,7 @@ class _AuthPageState extends State<AuthPage> {
                           keyboardType: TextInputType.emailAddress,
                           textInputAction: TextInputAction.next,
                           autofillHints: const [AutofillHints.email],
-                          decoration: const InputDecoration(
-                            labelText: 'Email',
-                          ),
+                          decoration: const InputDecoration(labelText: 'Email'),
                           validator: (value) {
                             final text = (value ?? '').trim();
                             if (!text.contains('@') || !text.contains('.')) {
@@ -269,7 +266,9 @@ class _AuthPageState extends State<AuthPage> {
                                 ? const SizedBox(
                                     width: 20,
                                     height: 20,
-                                    child: CircularProgressIndicator(strokeWidth: 2),
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
                                   )
                                 : const Text('Войти'),
                           )
@@ -281,7 +280,9 @@ class _AuthPageState extends State<AuthPage> {
                                 ? const SizedBox(
                                     width: 20,
                                     height: 20,
-                                    child: CircularProgressIndicator(strokeWidth: 2),
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
                                   )
                                 : const Text('Создать аккаунт'),
                           ),
@@ -318,8 +319,12 @@ class _AuthPageState extends State<AuthPage> {
     await widget.onOnboardingCollected(
       OnboardingProfileInput(
         age: int.parse(_ageController.text.trim()),
-        heightCm: double.parse(_heightController.text.trim().replaceAll(',', '.')),
-        weightKg: double.parse(_weightController.text.trim().replaceAll(',', '.')),
+        heightCm: double.parse(
+          _heightController.text.trim().replaceAll(',', '.'),
+        ),
+        weightKg: double.parse(
+          _weightController.text.trim().replaceAll(',', '.'),
+        ),
         occupation: _occupationController.text.trim(),
         goal: _selectedGoal,
         lifestyleType: _selectedLifestyle,

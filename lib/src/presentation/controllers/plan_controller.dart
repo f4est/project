@@ -9,6 +9,7 @@ import 'package:project/src/domain/repositories/workout_history_repository.dart'
 import 'package:project/src/domain/usecases/load_user_plan_use_case.dart';
 import 'package:project/src/domain/usecases/save_onboarding_profile_use_case.dart';
 import 'package:project/src/domain/usecases/save_user_profile_use_case.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class PlanController extends ChangeNotifier {
   PlanController({
@@ -17,11 +18,11 @@ class PlanController extends ChangeNotifier {
     required SaveOnboardingProfileUseCase saveOnboardingProfileUseCase,
     required SaveUserProfileUseCase saveUserProfileUseCase,
     DateTime Function()? clock,
-  })  : _loadUserPlanUseCase = loadUserPlanUseCase,
-        _workoutHistoryRepository = workoutHistoryRepository,
-        _saveOnboardingProfileUseCase = saveOnboardingProfileUseCase,
-        _saveUserProfileUseCase = saveUserProfileUseCase,
-        _clock = clock ?? DateTime.now;
+  }) : _loadUserPlanUseCase = loadUserPlanUseCase,
+       _workoutHistoryRepository = workoutHistoryRepository,
+       _saveOnboardingProfileUseCase = saveOnboardingProfileUseCase,
+       _saveUserProfileUseCase = saveUserProfileUseCase,
+       _clock = clock ?? DateTime.now;
 
   final LoadUserPlanUseCase _loadUserPlanUseCase;
   final WorkoutHistoryRepository _workoutHistoryRepository;
@@ -36,16 +37,21 @@ class PlanController extends ChangeNotifier {
   ProgressStats? _progressStats;
   String? _activeUserId;
   String? _activeUserName;
+  Set<String> _completedExercises = <String>{};
+  Set<int> _completedWorkoutDays = <int>{};
 
   bool get isLoading => _isLoading;
   String? get errorMessage => _errorMessage;
   WeeklyWorkoutPlan? get plan => _plan;
   UserProfile? get profile => _profile;
   ProgressStats? get progressStats => _progressStats;
+  bool isExerciseCompleted(int dayIndex, String exerciseName) =>
+      _completedExercises.contains(_exerciseKey(dayIndex, exerciseName));
 
   Future<void> loadForUser(AuthUser user) async {
     _activeUserId = user.id;
     _activeUserName = user.displayName;
+    await _loadCompletedExercises();
     await _loadInternal();
   }
 
@@ -103,9 +109,61 @@ class PlanController extends ChangeNotifier {
     _plan = null;
     _profile = null;
     _progressStats = null;
+    _completedExercises = <String>{};
+    _completedWorkoutDays = <int>{};
     _errorMessage = null;
     _isLoading = false;
     notifyListeners();
+  }
+
+  Future<void> markExerciseCompleted({
+    required int dayIndex,
+    required String exerciseName,
+    required bool completed,
+  }) async {
+    final userId = _activeUserId;
+    if (userId == null) {
+      return;
+    }
+    final key = _exerciseKey(dayIndex, exerciseName);
+    if (completed) {
+      _completedExercises.add(key);
+    } else {
+      _completedExercises.remove(key);
+    }
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(
+      _exerciseStorageKey(userId),
+      _completedExercises.toList(growable: false),
+    );
+
+    final dayPlan = _plan?.dailyPlans
+        .where((d) => d.dayIndex == dayIndex)
+        .firstOrNull;
+    if (completed &&
+        dayPlan != null &&
+        !_completedWorkoutDays.contains(dayIndex) &&
+        dayPlan.exercises.every((e) => isExerciseCompleted(dayIndex, e.name))) {
+      await _workoutHistoryRepository.saveSession(
+        userId,
+        WorkoutSessionResult(
+          date: _clock(),
+          completed: true,
+          perceivedDifficulty: 5,
+          fatigueLevel: 5,
+          enjoymentScore: 7,
+          workoutMinutes: dayPlan.estimatedMinutes.clamp(10, 180),
+          feedback: 'Тренировка отмечена вручную',
+        ),
+      );
+      _completedWorkoutDays.add(dayIndex);
+      await prefs.setStringList(
+        _completedDaysStorageKey(userId),
+        _completedWorkoutDays.map((e) => '$e').toList(growable: false),
+      );
+      await _loadInternal();
+    }
   }
 
   Future<void> _loadInternal() async {
@@ -134,4 +192,30 @@ class PlanController extends ChangeNotifier {
       notifyListeners();
     }
   }
+
+  Future<void> _loadCompletedExercises() async {
+    final userId = _activeUserId;
+    if (userId == null) {
+      _completedExercises = <String>{};
+      return;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    _completedExercises = Set<String>.from(
+      prefs.getStringList(_exerciseStorageKey(userId)) ?? const <String>[],
+    );
+    _completedWorkoutDays = Set<int>.from(
+      (prefs.getStringList(_completedDaysStorageKey(userId)) ??
+              const <String>[])
+          .map((e) => int.tryParse(e))
+          .whereType<int>(),
+    );
+  }
+
+  String _exerciseStorageKey(String userId) =>
+      'plan.completed_exercises.$userId';
+  String _completedDaysStorageKey(String userId) =>
+      'plan.completed_days.$userId';
+
+  String _exerciseKey(int dayIndex, String exerciseName) =>
+      '$dayIndex|${exerciseName.trim().toLowerCase()}';
 }

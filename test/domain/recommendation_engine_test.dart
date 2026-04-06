@@ -6,6 +6,11 @@ import 'package:project/src/domain/services/recommendation_engine.dart';
 
 void main() {
   group('RecommendationEngine', () {
+    test('contains expanded exercise catalog for personalization', () {
+      final engine = RecommendationEngine();
+      expect(engine.catalogSize, greaterThanOrEqualTo(30));
+    });
+
     test('creates weekly plan with intensity lowered for weak adherence', () {
       final engine = RecommendationEngine();
       final profile = UserProfile.defaultProfile(

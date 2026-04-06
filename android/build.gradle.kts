@@ -5,6 +5,17 @@ allprojects {
     }
 }
 
+subprojects {
+    tasks.withType<JavaCompile>().configureEach {
+        options.compilerArgs.addAll(
+            listOf(
+                "-Xlint:-deprecation",
+                "-Xlint:-unchecked",
+            ),
+        )
+    }
+}
+
 val newBuildDir: Directory =
     rootProject.layout.buildDirectory
         .dir("../../build")

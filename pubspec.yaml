@@ -42,6 +42,9 @@ dependencies:
   google_mlkit_pose_detection: ^0.14.1
   flutter_tts: ^4.2.5
   shared_preferences: ^2.5.3
+  http: ^1.5.0
+  health: ^13.1.1
+  workmanager: ^0.9.0+3
 
 dev_dependencies:
   flutter_test:
@@ -53,6 +56,13 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "logo_FitPilot.png"
+  remove_alpha_ios: true
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

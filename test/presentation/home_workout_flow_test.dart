@@ -4,7 +4,7 @@ import 'package:project/src/app/app_dependencies.dart';
 import 'package:project/src/app/home_workout_ai_app.dart';
 
 void main() {
-  testWidgets('user signs up with profile data and sees plan + gamification', (
+  testWidgets('user signs up with profile data and sees plan + ai summary', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -34,6 +34,6 @@ void main() {
 
     expect(find.text('FitPilot'), findsWidgets);
     expect(find.byKey(const Key('planList')), findsOneWidget);
-    expect(find.text('AI-рекомендации'), findsOneWidget);
+    expect(find.text('Рекомендации на сегодня'), findsOneWidget);
   });
 }

@@ -28,21 +28,30 @@ class AppDependencies {
   final SessionController sessionController;
   final PlanController planController;
 
-  factory AppDependencies.create() {
+  factory AppDependencies.create({DateTime Function()? clock}) {
     final authGateway = FirebaseAuthGateway(FirebaseAuth.instance);
     final profileStore = FirestoreProfileStore(FirebaseFirestore.instance);
-    return AppDependencies._create(authGateway: authGateway, profileStore: profileStore);
+    return AppDependencies._create(
+      authGateway: authGateway,
+      profileStore: profileStore,
+      clock: clock,
+    );
   }
 
-  factory AppDependencies.createStub() {
+  factory AppDependencies.createStub({DateTime Function()? clock}) {
     final authGateway = FirebaseAuthStub();
     final profileStore = FirebaseProfileStoreStub();
-    return AppDependencies._create(authGateway: authGateway, profileStore: profileStore);
+    return AppDependencies._create(
+      authGateway: authGateway,
+      profileStore: profileStore,
+      clock: clock,
+    );
   }
 
   factory AppDependencies._create({
     required AuthGateway authGateway,
     required UserProfileStore profileStore,
+    DateTime Function()? clock,
   }) {
     final authRepository = AuthRepositoryImpl(authGateway);
     final profileRepository = UserProfileRepositoryImpl(profileStore);
@@ -76,6 +85,7 @@ class AppDependencies {
       workoutHistoryRepository: historyRepository,
       saveOnboardingProfileUseCase: saveOnboardingProfileUseCase,
       saveUserProfileUseCase: saveUserProfileUseCase,
+      clock: clock,
     );
 
     return AppDependencies._(

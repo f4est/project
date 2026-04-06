@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:project/src/core/time_sync_controller.dart';
 import 'package:project/src/presentation/controllers/app_settings_controller.dart';
 import 'package:project/src/presentation/controllers/plan_controller.dart';
 import 'package:project/src/presentation/controllers/session_controller.dart';
+import 'package:project/src/presentation/controllers/wearables_controller.dart';
 import 'package:project/src/presentation/pages/auth_page.dart';
 import 'package:project/src/presentation/pages/app_shell_page.dart';
 
@@ -11,11 +13,15 @@ class RootPage extends StatelessWidget {
     required this.sessionController,
     required this.planController,
     required this.settingsController,
+    required this.wearablesController,
+    required this.timeSyncController,
   });
 
   final SessionController sessionController;
   final PlanController planController;
   final AppSettingsController settingsController;
+  final WearablesController wearablesController;
+  final TimeSyncController timeSyncController;
 
   @override
   Widget build(BuildContext context) {
@@ -43,6 +49,8 @@ class RootPage extends StatelessWidget {
           planController: planController,
           sessionController: sessionController,
           settingsController: settingsController,
+          wearablesController: wearablesController,
+          timeSyncController: timeSyncController,
         );
       },
     );

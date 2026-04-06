@@ -1,6 +1,7 @@
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:project/src/core/time_sync_controller.dart';
 import 'package:project/src/domain/entities/auth_user.dart';
 import 'package:project/src/domain/entities/progress_stats.dart';
 import 'package:project/src/domain/entities/user_profile.dart';
@@ -8,8 +9,10 @@ import 'package:project/src/domain/entities/workout_plan.dart';
 import 'package:project/src/presentation/controllers/app_settings_controller.dart';
 import 'package:project/src/presentation/controllers/plan_controller.dart';
 import 'package:project/src/presentation/controllers/session_controller.dart';
+import 'package:project/src/presentation/controllers/wearables_controller.dart';
 import 'package:project/src/presentation/pages/live_workout_page.dart';
 import 'package:project/src/presentation/pages/settings_page.dart';
+import 'package:project/src/presentation/pages/wearable_catalog_page.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 class AppShellPage extends StatefulWidget {
@@ -19,12 +22,16 @@ class AppShellPage extends StatefulWidget {
     required this.planController,
     required this.sessionController,
     required this.settingsController,
+    required this.wearablesController,
+    required this.timeSyncController,
   });
 
   final AuthUser user;
   final PlanController planController;
   final SessionController sessionController;
   final AppSettingsController settingsController;
+  final WearablesController wearablesController;
+  final TimeSyncController timeSyncController;
 
   @override
   State<AppShellPage> createState() => _AppShellPageState();
@@ -52,13 +59,18 @@ class _AppShellPageState extends State<AppShellPage> {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: widget.planController,
+      animation: Listenable.merge([
+        widget.planController,
+        widget.wearablesController,
+      ]),
       builder: (context, _) {
         final plan = widget.planController.plan;
         final profile = widget.planController.profile;
         final progress = widget.planController.progressStats;
         final isLoading = widget.planController.isLoading;
         final error = widget.planController.errorMessage;
+        final health = widget.wearablesController.snapshot;
+        final nowDate = widget.timeSyncController.now();
 
         final pages = <Widget>[
           _HomeTab(
@@ -70,13 +82,50 @@ class _AppShellPageState extends State<AppShellPage> {
           ),
           _WorkoutsTab(
             plan: plan,
+            nowDate: nowDate,
             onOpenVideo: _openExerciseVideo,
             onStartLiveControl: _startLiveControlForDay,
+            isExerciseCompleted: widget.planController.isExerciseCompleted,
+            onToggleExerciseCompleted:
+                ({
+                  required int dayIndex,
+                  required String exerciseName,
+                  required bool completed,
+                }) {
+                  return widget.planController.markExerciseCompleted(
+                    dayIndex: dayIndex,
+                    exerciseName: exerciseName,
+                    completed: completed,
+                  );
+                },
+          ),
+          _DevicesTab(
+            controller: widget.wearablesController,
+            onOpenCatalog: () async {
+              await Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => WearableCatalogPage(
+                    controller: widget.wearablesController,
+                  ),
+                ),
+              );
+            },
+            calories: health.calories,
+            steps: health.steps,
+            activeMinutes: health.activeMinutes,
+            walkingDistanceMeters: health.walkingDistanceMeters,
+            weightKg: health.weightKg,
+            sleepHours: health.sleepHours,
+            sleepMinutes: health.sleepMinutes,
+            heartRate: health.heartRate,
+            spo2: health.spo2,
           ),
           _AnalyticsTab(progress: progress, plan: plan),
           _ProfileTab(
             user: widget.user,
             profile: profile,
+            progress: progress,
+            wearablesController: widget.wearablesController,
             onSave: (value) => widget.planController.saveProfile(value),
           ),
         ];
@@ -85,6 +134,19 @@ class _AppShellPageState extends State<AppShellPage> {
           appBar: AppBar(
             title: Text(_titleForIndex(_tabIndex)),
             actions: [
+              if (_tabIndex == 2)
+                IconButton(
+                  onPressed: () async {
+                    await Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => WearableCatalogPage(
+                          controller: widget.wearablesController,
+                        ),
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.add_circle_outline),
+                ),
               IconButton(
                 onPressed: () {
                   Navigator.of(context).push(
@@ -128,6 +190,11 @@ class _AppShellPageState extends State<AppShellPage> {
                 label: 'Тренировки',
               ),
               NavigationDestination(
+                icon: Icon(Icons.watch_outlined),
+                selectedIcon: Icon(Icons.watch),
+                label: 'Устройства',
+              ),
+              NavigationDestination(
                 icon: Icon(Icons.insights_outlined),
                 selectedIcon: Icon(Icons.insights),
                 label: 'Аналитика',
@@ -148,7 +215,8 @@ class _AppShellPageState extends State<AppShellPage> {
     return switch (index) {
       0 => 'FitPilot',
       1 => 'Тренировки',
-      2 => 'Аналитика',
+      2 => 'Устройства',
+      3 => 'Аналитика',
       _ => 'Профиль',
     };
   }
@@ -164,11 +232,35 @@ class _AppShellPageState extends State<AppShellPage> {
   }
 
   Future<void> _startLiveControlForDay(DailyWorkoutPlan dayPlan) async {
+    final liveExercises = dayPlan.exercises
+        .where((e) => _supportsLiveTracking(e.name))
+        .toList(growable: false);
+    if (liveExercises.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Для этого упражнения пока нет проверки через камеру.',
+            ),
+          ),
+        );
+      }
+      return;
+    }
+    final livePlan = DailyWorkoutPlan(
+      dayIndex: dayPlan.dayIndex,
+      title: dayPlan.title,
+      focus: dayPlan.focus,
+      intensityPercent: dayPlan.intensityPercent,
+      estimatedMinutes: dayPlan.estimatedMinutes,
+      exercises: liveExercises,
+    );
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => LiveWorkoutPage(
-          dayPlan: dayPlan,
+          dayPlan: livePlan,
           appSettings: widget.settingsController.settings,
+          nowProvider: widget.timeSyncController.now,
           onSessionFinished:
               ({
                 required bool completed,
@@ -191,6 +283,21 @@ class _AppShellPageState extends State<AppShellPage> {
       ),
     );
   }
+
+  bool _supportsLiveTracking(String exerciseName) {
+    final name = exerciseName.toLowerCase();
+    return name.contains('присед') ||
+        name.contains('поворот') ||
+        name.contains('планк') ||
+        name.contains('выпад') ||
+        name.contains('скалолаз') ||
+        name.contains('мост') ||
+        name.contains('отжим') ||
+        name.contains('джампинг') ||
+        name.contains('высокие колени') ||
+        name.contains('конькобежец') ||
+        name.contains('берпи');
+  }
 }
 
 class _HomeTab extends StatelessWidget {
@@ -212,35 +319,19 @@ class _HomeTab extends StatelessWidget {
   Widget build(BuildContext context) {
     final p = progress;
     final today = plan?.dailyPlans.firstOrNull;
+    final completionRate = p == null
+        ? null
+        : p.totalSessions == 0
+        ? 0
+        : ((p.completedSessions / p.totalSessions) * 100).round();
     return ListView(
       key: const Key('planList'),
       padding: const EdgeInsets.all(16),
       children: [
-        Text(
-          'План на сегодня',
-          style: Theme.of(context).textTheme.headlineSmall,
-        ),
-        const SizedBox(height: 10),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(today?.title ?? 'Тренировка загружается'),
-                const SizedBox(height: 6),
-                Text(
-                  today == null
-                      ? '...'
-                      : '${today.estimatedMinutes} мин • Интенсивность ${today.intensityPercent}%',
-                ),
-              ],
-            ),
-          ),
-        ),
+        _AIPriorityCard(today: today, completionRate: completionRate),
         const SizedBox(height: 16),
         Text(
-          'AI-рекомендации',
+          'Рекомендации на сегодня',
           style: Theme.of(context).textTheme.headlineSmall,
         ),
         const SizedBox(height: 10),
@@ -275,7 +366,7 @@ class _HomeTab extends StatelessWidget {
     final tips = <String>[];
     if (profile != null) {
       tips.add(
-        'Фокус недели: ${profile.goal.label.toLowerCase()}. Рекомендуем ${profile.sessionsPerWeek} тренировки по ${profile.sessionDurationMinutes} минут.',
+        'Цель недели: ${profile.goal.label.toLowerCase()}. Рекомендуемый режим: ${profile.sessionsPerWeek} тренировки по ${profile.sessionDurationMinutes} минут.',
       );
     }
     if (progress != null) {
@@ -292,7 +383,7 @@ class _HomeTab extends StatelessWidget {
         );
       } else {
         tips.add(
-          'Можно постепенно увеличить объем: +1 подход в базовых упражнениях.',
+          'Можно постепенно увеличить нагрузку: +1 подход в базовых упражнениях.',
         );
       }
     }
@@ -308,70 +399,164 @@ class _HomeTab extends StatelessWidget {
 class _WorkoutsTab extends StatelessWidget {
   const _WorkoutsTab({
     required this.plan,
+    required this.nowDate,
     required this.onOpenVideo,
     required this.onStartLiveControl,
+    required this.isExerciseCompleted,
+    required this.onToggleExerciseCompleted,
   });
 
   final WeeklyWorkoutPlan? plan;
+  final DateTime nowDate;
   final Future<void> Function(String url) onOpenVideo;
   final Future<void> Function(DailyWorkoutPlan dayPlan) onStartLiveControl;
+  final bool Function(int dayIndex, String exerciseName) isExerciseCompleted;
+  final Future<void> Function({
+    required int dayIndex,
+    required String exerciseName,
+    required bool completed,
+  })
+  onToggleExerciseCompleted;
 
   @override
   Widget build(BuildContext context) {
     if (plan == null) {
       return const Center(child: CircularProgressIndicator());
     }
-    return ListView.separated(
+    final plans = plan!.dailyPlans;
+    final weekStart = _startOfWeek(nowDate);
+    final availableDayCount = min(plans.length, nowDate.weekday);
+
+    return ListView(
       padding: const EdgeInsets.all(16),
-      itemCount: plan!.dailyPlans.length,
-      separatorBuilder: (_, __) => const SizedBox(height: 12),
-      itemBuilder: (context, index) {
-        final day = plan!.dailyPlans[index];
-        return Card(
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  day.title,
-                  style: Theme.of(context).textTheme.headlineSmall,
-                ),
-                const SizedBox(height: 4),
-                Text('${day.estimatedMinutes} мин'),
-                const SizedBox(height: 8),
-                FilledButton.icon(
-                  onPressed: () => onStartLiveControl(day),
-                  icon: const Icon(Icons.videocam_outlined),
-                  label: const Text('Live-контроль тренировки'),
-                ),
-                const SizedBox(height: 8),
-                for (final exercise in day.exercises.take(4))
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: ListTile(
-                      tileColor: Theme.of(
-                        context,
-                      ).colorScheme.surfaceContainerHighest,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      title: Text(
-                        '${exercise.name} (${exercise.sets}x${exercise.reps})',
-                      ),
-                      subtitle: Text('Отдых ${exercise.restSeconds} сек'),
-                      trailing: IconButton(
-                        onPressed: () => onOpenVideo(exercise.videoUrl),
-                        icon: const Icon(Icons.play_circle_outline),
-                      ),
+      children: [
+        for (var i = 0; i < plans.length; i++) ...[
+          _buildDayCard(
+            context: context,
+            day: plans[i],
+            dayDate: weekStart.add(Duration(days: i)),
+            unlocked: i < availableDayCount,
+          ),
+          const SizedBox(height: 12),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildDayCard({
+    required BuildContext context,
+    required DailyWorkoutPlan day,
+    required DateTime dayDate,
+    required bool unlocked,
+  }) {
+    final dayLabel = _formatDate(dayDate);
+    if (!unlocked) {
+      return Card(
+        child: ListTile(
+          leading: const Icon(Icons.lock_outline),
+          title: Text(day.title),
+          subtitle: Text('Откроется $dayLabel'),
+        ),
+      );
+    }
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(day.title, style: Theme.of(context).textTheme.headlineSmall),
+            const SizedBox(height: 4),
+            Text('$dayLabel • ${day.estimatedMinutes} мин'),
+            const SizedBox(height: 10),
+            for (final exercise in day.exercises)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: ListTile(
+                  tileColor: Theme.of(
+                    context,
+                  ).colorScheme.surfaceContainerHighest,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  title: Text(
+                    '${exercise.name} (${exercise.sets}x${exercise.reps})',
+                  ),
+                  subtitle: Text('Отдых ${exercise.restSeconds} сек'),
+                  trailing: SizedBox(
+                    width: 150,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        Checkbox(
+                          value: isExerciseCompleted(
+                            day.dayIndex,
+                            exercise.name,
+                          ),
+                          onChanged: (value) {
+                            onToggleExerciseCompleted(
+                              dayIndex: day.dayIndex,
+                              exerciseName: exercise.name,
+                              completed: value ?? false,
+                            );
+                          },
+                        ),
+                        if (_isLiveSupportedExercise(exercise.name))
+                          IconButton(
+                            tooltip: 'Контроль техники',
+                            onPressed: () {
+                              final singleExercisePlan = DailyWorkoutPlan(
+                                dayIndex: day.dayIndex,
+                                title: '${day.title} • ${exercise.name}',
+                                focus: day.focus,
+                                intensityPercent: day.intensityPercent,
+                                estimatedMinutes: day.estimatedMinutes,
+                                exercises: [exercise],
+                              );
+                              onStartLiveControl(singleExercisePlan);
+                            },
+                            icon: const Icon(Icons.videocam_outlined),
+                          ),
+                        IconButton(
+                          onPressed: () => onOpenVideo(exercise.videoUrl),
+                          icon: const Icon(Icons.play_circle_outline),
+                        ),
+                      ],
                     ),
                   ),
-              ],
-            ),
-          ),
-        );
-      },
+                ),
+              ),
+          ],
+        ),
+      ),
     );
+  }
+
+  String _formatDate(DateTime value) {
+    final dd = value.day.toString().padLeft(2, '0');
+    final mm = value.month.toString().padLeft(2, '0');
+    return '$dd.$mm.${value.year}';
+  }
+
+  DateTime _startOfWeek(DateTime now) {
+    final date = DateTime(now.year, now.month, now.day);
+    return date.subtract(Duration(days: date.weekday - 1));
+  }
+
+  bool _isLiveSupportedExercise(String exerciseName) {
+    final name = exerciseName.toLowerCase();
+    return name.contains('присед') ||
+        name.contains('поворот') ||
+        name.contains('планк') ||
+        name.contains('выпад') ||
+        name.contains('скалолаз') ||
+        name.contains('мост') ||
+        name.contains('отжим') ||
+        name.contains('джампинг') ||
+        name.contains('высокие колени') ||
+        name.contains('конькобежец') ||
+        name.contains('берпи');
   }
 }
 
@@ -414,11 +599,11 @@ class _AnalyticsTab extends StatelessWidget {
         _MetricCard(
           title: 'Серия',
           value: '${p.streakDays} дн',
-          subtitle: 'Стабильность повышает точность AI-рекомендаций.',
+          subtitle: 'Стабильность повышает точность персональных рекомендаций.',
         ),
         const SizedBox(height: 16),
         Text(
-          'Пояснения алгоритма',
+          'Почему выбран именно такой план',
           style: Theme.of(context).textTheme.headlineSmall,
         ),
         const SizedBox(height: 8),
@@ -433,6 +618,272 @@ class _AnalyticsTab extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+class _DevicesTab extends StatelessWidget {
+  const _DevicesTab({
+    required this.controller,
+    required this.onOpenCatalog,
+    required this.calories,
+    required this.steps,
+    required this.activeMinutes,
+    required this.walkingDistanceMeters,
+    required this.weightKg,
+    required this.sleepHours,
+    required this.sleepMinutes,
+    required this.heartRate,
+    required this.spo2,
+  });
+
+  final WearablesController controller;
+  final Future<void> Function() onOpenCatalog;
+  final int calories;
+  final int steps;
+  final int activeMinutes;
+  final int walkingDistanceMeters;
+  final double weightKg;
+  final int sleepHours;
+  final int sleepMinutes;
+  final int heartRate;
+  final int spo2;
+
+  @override
+  Widget build(BuildContext context) {
+    final connected = controller.sources.where((s) => s.connected).toList();
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      'Панель здоровья',
+                      style: Theme.of(context).textTheme.headlineSmall,
+                    ),
+                    const Spacer(),
+                    IconButton(
+                      onPressed: controller.isSyncing
+                          ? null
+                          : controller.refresh,
+                      icon: controller.isSyncing
+                          ? const SizedBox.square(
+                              dimension: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.sync),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _HealthChip(
+                      label: 'Калории',
+                      value: calories > 0 ? '$calories ккал' : 'Нет данных',
+                    ),
+                    _HealthChip(
+                      label: 'Шаги',
+                      value: steps > 0 ? '$steps' : 'Нет данных',
+                    ),
+                    _HealthChip(
+                      label: 'Активность',
+                      value: activeMinutes > 0
+                          ? '$activeMinutes мин'
+                          : 'Нет данных',
+                    ),
+                    _HealthChip(
+                      label: 'Дистанция',
+                      value: walkingDistanceMeters > 0
+                          ? '$walkingDistanceMeters м'
+                          : 'Нет данных',
+                    ),
+                    _HealthChip(
+                      label: 'Вес',
+                      value: weightKg > 0
+                          ? '${weightKg.toStringAsFixed(1)} кг'
+                          : 'Нет данных',
+                    ),
+                    _HealthChip(
+                      label: 'Сон',
+                      value: sleepHours > 0 || sleepMinutes > 0
+                          ? '$sleepHours ч $sleepMinutes мин'
+                          : 'Нет данных',
+                    ),
+                    _HealthChip(
+                      label: 'Пульс',
+                      value: heartRate > 0 ? '$heartRate уд/мин' : 'Нет данных',
+                    ),
+                    _HealthChip(
+                      label: 'Кислород (SpO2)',
+                      value: spo2 > 0 ? '$spo2%' : 'Нет данных',
+                    ),
+                  ],
+                ),
+                if (controller.errorMessage != null) ...[
+                  const SizedBox(height: 10),
+                  Text(
+                    controller.errorMessage!,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                ],
+                if (controller.actionHint != null) ...[
+                  const SizedBox(height: 8),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).colorScheme.secondaryContainer,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      'Что сделать: ${controller.actionHint!}',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                  ),
+                ],
+                if (controller.errorMessage != null &&
+                    controller.actionHint == null) ...[
+                  const SizedBox(height: 8),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Theme.of(
+                        context,
+                      ).colorScheme.surfaceContainerHighest,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Text(
+                      'Проверьте: 1) разрешения в Health Connect, 2) синхронизацию в приложении браслета, 3) обновление данных на этом экране.',
+                    ),
+                  ),
+                ],
+                if (controller.lastSyncAt != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    'Последняя синхронизация: ${_formatTime(controller.lastSyncAt!)}',
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 14),
+        Card(
+          child: ListTile(
+            leading: const Icon(Icons.add_link),
+            title: const Text('Подключить устройство'),
+            subtitle: const Text(
+              'Откроется каталог подключения часов и браслетов.',
+            ),
+            trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+            onTap: onOpenCatalog,
+          ),
+        ),
+        const SizedBox(height: 10),
+        Text(
+          'Подключенные устройства',
+          style: Theme.of(context).textTheme.headlineSmall,
+        ),
+        const SizedBox(height: 8),
+        if (connected.isEmpty)
+          const Card(
+            child: Padding(
+              padding: EdgeInsets.all(12),
+              child: Text(
+                'Пока нет подключенных устройств. Нажмите кнопку "+" вверху, чтобы добавить источник данных.',
+              ),
+            ),
+          ),
+        for (final source in connected) ...[
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.watch),
+              title: Text(source.title),
+              subtitle: Text(source.status),
+              trailing: const Icon(Icons.check_circle, color: Colors.green),
+            ),
+          ),
+          const SizedBox(height: 8),
+        ],
+        const SizedBox(height: 8),
+        Text(
+          'История показателей по дням',
+          style: Theme.of(context).textTheme.headlineSmall,
+        ),
+        const SizedBox(height: 8),
+        if (controller.history.isEmpty)
+          const Card(
+            child: Padding(
+              padding: EdgeInsets.all(12),
+              child: Text(
+                'История появится после первой успешной синхронизации.',
+              ),
+            ),
+          ),
+        for (final day in controller.history.take(14)) ...[
+          Card(
+            child: ListTile(
+              title: Text(_formatDate(day.date)),
+              subtitle: Text(
+                'Шаги ${day.steps} • Калории ${day.calories} • Сон ${day.sleepHours}ч ${day.sleepMinutes}м',
+              ),
+              trailing: Text(
+                day.heartRate > 0 ? '${day.heartRate} уд/мин' : '—',
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+        ],
+      ],
+    );
+  }
+
+  String _formatTime(DateTime dateTime) {
+    final hh = dateTime.hour.toString().padLeft(2, '0');
+    final mm = dateTime.minute.toString().padLeft(2, '0');
+    return '$hh:$mm';
+  }
+
+  String _formatDate(DateTime dateTime) {
+    final dd = dateTime.day.toString().padLeft(2, '0');
+    final mm = dateTime.month.toString().padLeft(2, '0');
+    return '$dd.$mm.${dateTime.year}';
+  }
+}
+
+class _HealthChip extends StatelessWidget {
+  const _HealthChip({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: Theme.of(context).textTheme.labelMedium),
+          Text(value, style: Theme.of(context).textTheme.titleSmall),
+        ],
+      ),
     );
   }
 }
@@ -472,11 +923,15 @@ class _ProfileTab extends StatelessWidget {
   const _ProfileTab({
     required this.user,
     required this.profile,
+    required this.progress,
+    required this.wearablesController,
     required this.onSave,
   });
 
   final AuthUser user;
   final UserProfile? profile;
+  final ProgressStats? progress;
+  final WearablesController wearablesController;
   final Future<void> Function(UserProfile profile) onSave;
 
   @override
@@ -485,21 +940,175 @@ class _ProfileTab extends StatelessWidget {
     if (p == null) {
       return const Center(child: CircularProgressIndicator());
     }
+    final stats = progress;
+    final points = stats?.totalPoints ?? 0;
+    final level = stats?.level ?? 1;
+    final pointsInLevel = points % 1000;
+    final levelProgress = (pointsInLevel / 1000).clamp(0.0, 1.0);
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        ListTile(
-          contentPadding: EdgeInsets.zero,
-          leading: CircleAvatar(
-            radius: 26,
-            child: Text(
-              user.displayName.isNotEmpty
-                  ? user.displayName.substring(0, 1).toUpperCase()
-                  : 'A',
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Row(
+              children: [
+                Container(
+                  width: 58,
+                  height: 58,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: LinearGradient(
+                      colors: [
+                        Theme.of(context).colorScheme.primaryContainer,
+                        Theme.of(context).colorScheme.secondaryContainer,
+                      ],
+                    ),
+                  ),
+                  child: Center(
+                    child: Text(
+                      user.displayName.isNotEmpty
+                          ? user.displayName.substring(0, 1).toUpperCase()
+                          : 'A',
+                      style: Theme.of(context).textTheme.headlineSmall,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        user.displayName,
+                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      Text(
+                        user.email,
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ),
-          title: Text(user.displayName),
-          subtitle: Text(user.email),
+        ),
+        const SizedBox(height: 12),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Динамика активности (последние 7 дней)',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                if (wearablesController.history.isEmpty)
+                  const Text(
+                    'Пока нет сохраненной истории. Подключите устройство и выполните синхронизацию.',
+                  )
+                else
+                  for (final day in wearablesController.history.take(7))
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: Theme.of(
+                            context,
+                          ).colorScheme.surfaceContainerHighest,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                '${day.date.day.toString().padLeft(2, '0')}.${day.date.month.toString().padLeft(2, '0')}',
+                              ),
+                            ),
+                            Expanded(child: Text('Шаги ${day.steps}')),
+                            Expanded(child: Text('Ккал ${day.calories}')),
+                            Expanded(
+                              child: Text(
+                                'Пульс ${day.heartRate > 0 ? day.heartRate : '—'}',
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Прогресс профиля',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Уровень $level • ${stats?.leagueName ?? 'Новичок'}',
+                      ),
+                    ),
+                    Text('$points XP'),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                LinearProgressIndicator(
+                  value: levelProgress,
+                  minHeight: 10,
+                  borderRadius: BorderRadius.circular(99),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'До следующего уровня: ${1000 - pointsInLevel} XP',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _MiniMetricChip(
+                      icon: Icons.local_fire_department_outlined,
+                      label: 'Серия',
+                      value: '${stats?.streakDays ?? 0} дн',
+                    ),
+                    _MiniMetricChip(
+                      icon: Icons.check_circle_outline,
+                      label: 'Выполнено',
+                      value:
+                          '${stats?.completedSessions ?? 0}/${stats?.totalSessions ?? 0}',
+                    ),
+                    _MiniMetricChip(
+                      icon: Icons.timeline_outlined,
+                      label: 'Дисциплина',
+                      value: '${stats?.completionRatePercent ?? 0}%',
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
         ),
         const SizedBox(height: 12),
         Card(
@@ -805,6 +1414,105 @@ class _ProfileStat extends StatelessWidget {
         const SizedBox(height: 2),
         Text(label),
       ],
+    );
+  }
+}
+
+class _AIPriorityCard extends StatelessWidget {
+  const _AIPriorityCard({required this.today, required this.completionRate});
+
+  final DailyWorkoutPlan? today;
+  final int? completionRate;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(20),
+          gradient: LinearGradient(
+            colors: [
+              Theme.of(context).colorScheme.primaryContainer,
+              Theme.of(context).colorScheme.secondaryContainer,
+            ],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+        ),
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Интеллектуальный план на сегодня',
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 8),
+            Text(today?.title ?? 'Подбираем тренировку'),
+            const SizedBox(height: 6),
+            Text(
+              today == null
+                  ? 'Собираем историю активности.'
+                  : '${today!.estimatedMinutes} мин • Интенсивность ${today!.intensityPercent}%',
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                _MiniMetricChip(
+                  icon: Icons.auto_awesome_outlined,
+                  label: 'Подбор плана',
+                  value: 'Включён',
+                ),
+                _MiniMetricChip(
+                  icon: Icons.track_changes_outlined,
+                  label: 'Цель',
+                  value: today?.focus.label ?? '...',
+                ),
+                _MiniMetricChip(
+                  icon: Icons.check_circle_outline,
+                  label: 'Выполнение',
+                  value: completionRate == null ? '...' : '$completionRate%',
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MiniMetricChip extends StatelessWidget {
+  const _MiniMetricChip({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface.withValues(alpha: 0.72),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 16),
+          const SizedBox(width: 6),
+          Text('$label: $value'),
+        ],
+      ),
     );
   }
 }
